@@ -99,7 +99,7 @@ resource "aws_instance" "dev" {
       },
       "metrics": {
         "append_dimensions": {
-          "InstanceId": "\${aws:InstanceId}"
+          "InstanceId": "\$${aws:InstanceId}"
         },
         "metrics_collected": {
           "cpu": {
@@ -151,7 +151,7 @@ resource "aws_instance" "prod" {
       },
       "metrics": {
         "append_dimensions": {
-          "InstanceId": "\${aws:InstanceId}"
+          "InstanceId": "\$${aws:InstanceId}"
         },
         "metrics_collected": {
           "cpu": {
