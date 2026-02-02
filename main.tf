@@ -85,6 +85,7 @@ resource "aws_instance" "dev" {
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.dev.id
   vpc_security_group_ids = [aws_security_group.ssh.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
   user_data = <<-EOF
     #!/bin/bash
@@ -137,6 +138,7 @@ resource "aws_instance" "prod" {
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.prod.id
   vpc_security_group_ids = [aws_security_group.ssh.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
   user_data = <<-EOF
     #!/bin/bash

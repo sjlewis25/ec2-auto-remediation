@@ -3,3 +3,4 @@
 *.tfstate.backup
 terraform.tfvars
 *.zip
+lambda_src/remediation.zip
