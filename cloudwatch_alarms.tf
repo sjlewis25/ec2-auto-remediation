@@ -1,93 +1,37 @@
-# CPU Alarm - Dev
-resource "aws_cloudwatch_metric_alarm" "cpu_high_dev" {
-  alarm_name          = "dev-cpu-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 90
-  alarm_description   = "CPU usage over 90%"
-  dimensions = {
-    InstanceId = aws_instance.dev.id
+locals {
+  monitored_instances = {
+    dev  = aws_instance.dev.id
+    prod = aws_instance.prod.id
+  }
+
+  alarm_configs = {
+    cpu    = { metric_name = "CPUUtilization",    namespace = "AWS/EC2", threshold = 90, description = "CPU usage over 90%" }
+    memory = { metric_name = "mem_used_percent",  namespace = "CWAgent", threshold = 80, description = "Memory usage over 80%" }
+    disk   = { metric_name = "disk_used_percent", namespace = "CWAgent", threshold = 85, description = "Disk usage over 85%" }
   }
 }
 
-# Memory Alarm - Dev
-resource "aws_cloudwatch_metric_alarm" "memory_high_dev" {
-  alarm_name          = "dev-memory-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "mem_used_percent"
-  namespace           = "CWAgent"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 80
-  alarm_description   = "Memory usage over 80%"
-  dimensions = {
-    InstanceId = aws_instance.dev.id
+resource "aws_cloudwatch_metric_alarm" "resource_high" {
+  for_each = {
+    for pair in setproduct(keys(local.monitored_instances), keys(local.alarm_configs)) :
+    "${pair[0]}-${pair[1]}" => {
+      env         = pair[0]
+      instance_id = local.monitored_instances[pair[0]]
+      cfg         = local.alarm_configs[pair[1]]
+    }
   }
-}
 
-# Disk Alarm - Dev
-resource "aws_cloudwatch_metric_alarm" "disk_high_dev" {
-  alarm_name          = "dev-disk-high"
+  alarm_name          = "ec2-remediation-${each.key}"
   comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "disk_used_percent"
-  namespace           = "CWAgent"
+  evaluation_periods  = 3
+  metric_name         = each.value.cfg.metric_name
+  namespace           = each.value.cfg.namespace
   period              = 60
   statistic           = "Average"
-  threshold           = 85
-  alarm_description   = "Disk usage over 85%"
-  dimensions = {
-    InstanceId = aws_instance.dev.id
-  }
-}
+  threshold           = each.value.cfg.threshold
+  alarm_description   = each.value.cfg.description
 
-# Repeat for Prod
-resource "aws_cloudwatch_metric_alarm" "cpu_high_prod" {
-  alarm_name          = "prod-cpu-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 90
-  alarm_description   = "CPU usage over 90%"
   dimensions = {
-    InstanceId = aws_instance.prod.id
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "memory_high_prod" {
-  alarm_name          = "prod-memory-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "mem_used_percent"
-  namespace           = "CWAgent"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 80
-  alarm_description   = "Memory usage over 80%"
-  dimensions = {
-    InstanceId = aws_instance.prod.id
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "disk_high_prod" {
-  alarm_name          = "prod-disk-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "disk_used_percent"
-  namespace           = "CWAgent"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 85
-  alarm_description   = "Disk usage over 85%"
-  dimensions = {
-    InstanceId = aws_instance.prod.id
+    InstanceId = each.value.instance_id
   }
 }
