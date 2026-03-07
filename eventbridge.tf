@@ -1,13 +1,16 @@
 resource "aws_cloudwatch_event_rule" "alarm_trigger" {
   name        = "cloudwatch-alarm-remediation"
-  description = "Trigger Lambda when alarm state changes to ALARM"
+  description = "Trigger Lambda when a project alarm state changes to ALARM"
   event_pattern = jsonencode({
-    "source": ["aws.cloudwatch"],
-    "detail-type": ["CloudWatch Alarm State Change"],
-    "detail": {
-      "state": {
-        "value": ["ALARM"]
+    source      = ["aws.cloudwatch"]
+    detail-type = ["CloudWatch Alarm State Change"]
+    detail = {
+      state = {
+        value = ["ALARM"]
       }
+      alarmName = [{
+        prefix = "ec2-remediation-"
+      }]
     }
   })
 }
@@ -28,10 +31,13 @@ resource "aws_lambda_permission" "allow_eventbridge" {
 
 resource "aws_cloudwatch_event_rule" "guardduty_findings" {
   name        = "guardduty-threat-detection"
-  description = "Trigger Lambda on GuardDuty findings"
+  description = "Trigger Lambda on high-severity GuardDuty findings"
   event_pattern = jsonencode({
-    "source": ["aws.guardduty"],
-    "detail-type": ["GuardDuty Finding"]
+    source      = ["aws.guardduty"]
+    detail-type = ["GuardDuty Finding"]
+    detail = {
+      severity = [{ numeric = [">=", 7] }]
+    }
   })
 }
 
@@ -48,4 +54,3 @@ resource "aws_lambda_permission" "allow_guardduty" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.guardduty_findings.arn
 }
-

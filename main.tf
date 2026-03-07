@@ -2,10 +2,51 @@ provider "aws" {
   region = var.aws_region
 }
 
+locals {
+  cloudwatch_agent_user_data = <<-EOF
+    #!/bin/bash
+    yum update -y
+    yum install -y amazon-cloudwatch-agent
+
+    cat <<EOC > /opt/aws/amazon-cloudwatch-agent/bin/config.json
+    {
+      "agent": {
+        "metrics_collection_interval": 60,
+        "run_as_user": "root"
+      },
+      "metrics": {
+        "append_dimensions": {
+          "InstanceId": "\$${aws:InstanceId}"
+        },
+        "metrics_collected": {
+          "cpu": {
+            "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
+            "totalcpu": true
+          },
+          "mem": {
+            "measurement": ["mem_used_percent"]
+          },
+          "disk": {
+            "measurement": ["used_percent"],
+            "resources": ["*"]
+          }
+        }
+      }
+    }
+    EOC
+
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+      -a fetch-config \
+      -m ec2 \
+      -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json \
+      -s
+  EOF
+}
+
 # VPC
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
-  tags = { Name = "remediation-vpc" }
+  tags       = { Name = "remediation-vpc" }
 }
 
 # Subnets
@@ -13,14 +54,14 @@ resource "aws_subnet" "dev" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
-  tags = { Name = "Dev-Subnet" }
+  tags                    = { Name = "Dev-Subnet" }
 }
 
 resource "aws_subnet" "prod" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.2.0/24"
   map_public_ip_on_launch = true
-  tags = { Name = "Prod-Subnet" }
+  tags                    = { Name = "Prod-Subnet" }
 }
 
 # Internet Gateway and Route
@@ -50,8 +91,8 @@ resource "aws_route_table_association" "prod" {
 
 # Security Group
 resource "aws_security_group" "ssh" {
-  name        = "allow-ssh"
-  vpc_id      = aws_vpc.main.id
+  name   = "allow-ssh"
+  vpc_id = aws_vpc.main.id
 
   ingress {
     from_port   = 22
@@ -86,45 +127,7 @@ resource "aws_instance" "dev" {
   subnet_id              = aws_subnet.dev.id
   vpc_security_group_ids = [aws_security_group.ssh.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
-
-  user_data = <<-EOF
-    #!/bin/bash
-    yum update -y
-    yum install -y amazon-cloudwatch-agent
-
-    cat <<EOC > /opt/aws/amazon-cloudwatch-agent/bin/config.json
-    {
-      "agent": {
-        "metrics_collection_interval": 60,
-        "run_as_user": "root"
-      },
-      "metrics": {
-        "append_dimensions": {
-          "InstanceId": "\$${aws:InstanceId}"
-        },
-        "metrics_collected": {
-          "cpu": {
-            "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
-            "totalcpu": true
-          },
-          "mem": {
-            "measurement": ["mem_used_percent"]
-          },
-          "disk": {
-            "measurement": ["used_percent"],
-            "resources": ["*"]
-          }
-        }
-      }
-    }
-    EOC
-
-    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-      -a fetch-config \
-      -m ec2 \
-      -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json \
-      -s
-  EOF
+  user_data              = local.cloudwatch_agent_user_data
 
   tags = {
     Name        = "Dev-EC2"
@@ -139,49 +142,10 @@ resource "aws_instance" "prod" {
   subnet_id              = aws_subnet.prod.id
   vpc_security_group_ids = [aws_security_group.ssh.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
-
-  user_data = <<-EOF
-    #!/bin/bash
-    yum update -y
-    yum install -y amazon-cloudwatch-agent
-
-    cat <<EOC > /opt/aws/amazon-cloudwatch-agent/bin/config.json
-    {
-      "agent": {
-        "metrics_collection_interval": 60,
-        "run_as_user": "root"
-      },
-      "metrics": {
-        "append_dimensions": {
-          "InstanceId": "\$${aws:InstanceId}"
-        },
-        "metrics_collected": {
-          "cpu": {
-            "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
-            "totalcpu": true
-          },
-          "mem": {
-            "measurement": ["mem_used_percent"]
-          },
-          "disk": {
-            "measurement": ["used_percent"],
-            "resources": ["*"]
-          }
-        }
-      }
-    }
-    EOC
-
-    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-      -a fetch-config \
-      -m ec2 \
-      -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json \
-      -s
-  EOF
+  user_data              = local.cloudwatch_agent_user_data
 
   tags = {
     Name        = "Prod-EC2"
     Environment = "Prod"
   }
 }
-
