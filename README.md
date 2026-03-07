@@ -1,6 +1,6 @@
 # EC2 Auto-Remediation with CloudWatch and GuardDuty
 
-Automated incident response system that monitors EC2 instances for resource exhaustion and security threats, then automatically remediates by stopping affected instances and sending alerts.
+Automated incident response system that monitors EC2 instances for resource exhaustion and security threats, then automatically remediates by rebooting or stopping affected instances and sending alerts.
 
 ## Problem Statement
 
@@ -29,28 +29,29 @@ This project demonstrates AWS-native auto-remediation achieving sub-minute respo
 │  │  Custom Metrics  │                              │
 │  │  (CPU/Mem/Disk)  │                              │
 │  └────────┬─────────┘                              │
-│           │ threshold breach                        │
+│           │ threshold breach (3 consecutive mins)   │
 │           ↓                                         │
 │  ┌──────────────────┐      ┌──────────────┐       │
 │  │  CloudWatch      │      │  GuardDuty   │       │
 │  │    Alarms        │      │  Detector    │       │
 │  └────────┬─────────┘      └──────┬───────┘       │
 │           │                        │               │
-│           │ state change           │ finding       │
-│           ↓                        ↓               │
+│           │ state change           │ HIGH/CRITICAL │
+│           ↓                        │ finding only  │
 │  ┌─────────────────────────────────────────┐      │
 │  │         EventBridge Rules               │      │
-│  │  - Alarm State Change                   │      │
-│  │  - GuardDuty Finding                    │      │
+│  │  - Alarm State Change (scoped prefix)   │      │
+│  │  - GuardDuty Finding (severity >= 7)    │      │
 │  └────────┬────────────────────────────────┘      │
 │           │ triggers                               │
 │           ↓                                        │
-│  ┌──────────────────┐                             │
-│  │  Lambda Function │                             │
-│  │  (Remediation)   │                             │
-│  └────────┬─────────┘                             │
+│  ┌──────────────────┐      ┌──────────────┐      │
+│  │  Lambda Function │─────→│  SQS (DLQ)   │      │
+│  │  (Remediation)   │      │              │      │
+│  └────────┬─────────┘      └──────────────┘      │
 │           │                                        │
-│           ├──→ Stop EC2 Instance                  │
+│           ├──→ Reboot (resource alarm)            │
+│           ├──→ Stop (security threat)             │
 │           │                                        │
 │           └──→ Publish to SNS                     │
 │                      ↓                             │
@@ -69,13 +70,13 @@ This project demonstrates AWS-native auto-remediation achieving sub-minute respo
 EC2 instances run Amazon Linux 2 with CloudWatch Agent for metrics collection. VPC provides network isolation with public subnets for internet access.
 
 **Monitoring**
-CloudWatch Alarms monitor CPU (>90%), memory (>80%), and disk usage (>85%) with 1-minute evaluation periods. GuardDuty detects security threats including cryptocurrency mining, port scanning, and suspicious API calls.
+CloudWatch Alarms monitor CPU (>90%), memory (>80%), and disk usage (>85%) with 3 consecutive evaluation periods required before triggering. GuardDuty detects security threats including cryptocurrency mining, port scanning, and suspicious API calls.
 
 **Automation**
-EventBridge routes alarm state changes and GuardDuty findings to Lambda. Lambda function executes remediation logic within 1-2 seconds of event detection.
+EventBridge routes alarm state changes and GuardDuty findings to Lambda. Lambda function executes remediation logic within 1-2 seconds of event detection. A SQS dead-letter queue captures any failed invocations for investigation.
 
 **Notifications**
-SNS topic delivers email alerts with instance ID and remediation action. Subscription confirmation required on first deployment.
+SNS topic delivers email alerts with instance ID and remediation action taken. Subscription confirmation required on first deployment.
 
 **Infrastructure as Code**
 Terraform provisions all resources with declarative configuration. State management enables reliable updates and teardown.
@@ -83,16 +84,22 @@ Terraform provisions all resources with declarative configuration. State managem
 ## Features
 
 **Multi-Metric Monitoring**
-Tracks CPU utilization, memory usage, and disk space across development and production instances. Custom CloudWatch metrics delivered every 60 seconds.
+Tracks CPU utilization, memory usage, and disk space across development and production instances. Custom CloudWatch metrics delivered every 60 seconds. Alarms require 3 consecutive breaches before triggering to eliminate false positives from transient spikes.
 
-**Automated Remediation**
-Lambda function stops instances automatically when alarms trigger or security findings detected. Eliminates need for on-call intervention during off-hours.
+**Graduated Remediation**
+Lambda applies different responses based on the trigger source. Resource alarms (CPU/memory/disk) reboot the instance first, giving it a chance to recover without data loss. GuardDuty security findings stop the instance immediately to contain the threat.
+
+**Idempotent Execution**
+Lambda checks the current instance state before acting. Stops and reboots are skipped if the instance is already stopped, stopping, or terminated, preventing errors from duplicate event deliveries.
+
+**Scoped Event Routing**
+EventBridge rules filter precisely: the CloudWatch rule matches only alarms prefixed `ec2-remediation-`, and the GuardDuty rule matches only findings with severity >= 7 (HIGH or CRITICAL). Informational findings and unrelated alarms in the account do not trigger remediation.
 
 **Security Threat Detection**
 GuardDuty continuously analyzes VPC flow logs, DNS logs, and CloudTrail events. Identifies 50+ threat types including compromised credentials and unauthorized access attempts.
 
 **Real-Time Alerting**
-SNS email notifications sent within seconds of remediation action. Messages include instance details and triggering condition.
+SNS email notifications sent within seconds of remediation action. Messages include instance ID, action taken, and the triggering source.
 
 **Cost Efficient**
 Entire stack costs $2-3 monthly for small deployments. t3.micro instances eligible for free tier first 12 months. GuardDuty charges $0.50 per million events analyzed.
@@ -145,6 +152,13 @@ Test Lambda function:
 aws lambda invoke --function-name ec2-auto-remediation output.json
 ```
 
+Check dead-letter queue for any failed invocations:
+```
+aws sqs get-queue-attributes \
+  --queue-url $(aws sqs get-queue-url --queue-name ec2-remediation-dlq --query QueueUrl --output text) \
+  --attribute-names ApproximateNumberOfMessages
+```
+
 **Teardown**
 
 Remove all infrastructure:
@@ -162,6 +176,7 @@ terraform destroy
 | CloudWatch Alarms | 6 alarms | $0.60 |
 | Lambda | ~100 invocations | $0 |
 | SNS | ~100 notifications | $0 |
+| SQS (DLQ) | minimal | $0 |
 | GuardDuty | ~1M events | $0.50 |
 | Total | | $1.10 - $16.10 |
 
@@ -182,43 +197,54 @@ Initial Lambda timeout of 3 seconds caused intermittent failures during EC2 Stop
 **Challenge: GuardDuty Finding Structure**
 GuardDuty events have deeply nested JSON structure different from CloudWatch events. Lambda initially failed parsing instance IDs from GuardDuty findings. Examined CloudTrail logs to understand event schema. Implemented conditional logic handling both CloudWatch and GuardDuty event formats. Highlighted importance of testing with actual event payloads rather than assuming structure.
 
+**Challenge: Alarm Sensitivity and False Positives**
+Initial evaluation period of 1 triggered instance reboots on transient CPU spikes from normal operations like package updates. Raised to 3 consecutive evaluation periods (3 minutes) to confirm sustained resource pressure before acting. Reinforced that automated remediation requires conservative thresholds to avoid unnecessary disruption.
+
 **Skills Developed**
-Gained hands-on experience with event-driven automation patterns on AWS. Learned CloudWatch Agent configuration for custom metrics beyond default EC2 metrics. Developed proficiency in EventBridge pattern matching and rule configuration. Improved Terraform skills through modular resource organization. Deepened understanding of IAM roles, policies, and service-to-service authentication. Practiced incident response automation design applicable to production environments.
+Gained hands-on experience with event-driven automation patterns on AWS. Learned CloudWatch Agent configuration for custom metrics beyond default EC2 metrics. Developed proficiency in EventBridge pattern matching and rule configuration. Improved Terraform skills through for_each meta-arguments and locals for DRY configuration. Deepened understanding of IAM least-privilege scoping per resource. Practiced idempotent automation design to handle duplicate and out-of-order events.
 
 ## Security Considerations
 
 **IAM Permissions**
-Lambda execution role limited to EC2 stop operations and SNS publish. CloudWatch Agent uses managed policy with read-only access to SSM for configuration. No IAM user credentials stored in code or configuration.
+Lambda execution role scoped to specific actions: EC2 stop/reboot/describe, SNS publish to the project topic only, CloudWatch Logs write to the project log group only, and SQS send to the DLQ only. CloudWatch Agent uses managed policy with read-only access to SSM for configuration. No IAM user credentials stored in code or configuration.
 
 **Network Security**
 Security group allows SSH from all sources (0.0.0.0/0) for demonstration purposes. Production deployments should restrict to specific IP ranges or bastion hosts. Instances in public subnets for simplicity - production should use private subnets with NAT gateways.
 
 **GuardDuty Findings**
-Findings indicate potential security issues requiring investigation. Auto-stopping instances provides containment but not root cause analysis. Production environments need complementary forensics capabilities.
+Only HIGH and CRITICAL severity findings (severity >= 7) trigger auto-remediation. Lower severity findings are logged by GuardDuty but do not cause instance stops. Auto-stopping instances provides containment but not root cause analysis. Production environments need complementary forensics capabilities.
+
+**Event Scoping**
+EventBridge rules are scoped to prevent other alarms or GuardDuty findings in the account from triggering unintended remediation. CloudWatch rule matches only alarms prefixed `ec2-remediation-`.
 
 ## Future Enhancements
 
-Add AWS Systems Manager Session Manager for SSH-less instance access. Implement graduated response - restart instance before stopping for transient issues. Create CloudWatch dashboard visualizing metrics and alarm states. Add Slack integration via SNS for team notifications. Implement DynamoDB table tracking remediation history. Configure CloudWatch Insights queries for pattern analysis. Add automated snapshots before stopping instances for forensics. Integrate with AWS Security Hub for centralized security findings.
+Add AWS Systems Manager Session Manager for SSH-less instance access. Create CloudWatch dashboard visualizing metrics and alarm states. Add Slack integration via SNS for team notifications. Implement DynamoDB table tracking remediation history with timestamps and actions taken. Configure CloudWatch Insights queries for pattern analysis. Add automated EBS snapshots before stopping instances for forensics. Integrate with AWS Security Hub for centralized security findings. Implement second-stage stop after reboot if CloudWatch alarm re-triggers within a configurable window.
 
 ## Production Readiness Checklist
 
 **Implemented**
-Multi-instance monitoring across environments
-Automated remediation with sub-minute response time
-Security threat detection with GuardDuty
-Email alerting via SNS
-Infrastructure as code with Terraform
-IAM least privilege access
+- Multi-instance monitoring across environments
+- Automated remediation with sub-minute response time
+- Graduated response: reboot for resource alarms, stop for security threats
+- Idempotent execution with instance state checks
+- Security threat detection with GuardDuty (HIGH/CRITICAL only)
+- Scoped EventBridge rules to prevent cross-account alarm interference
+- Email alerting via SNS with action and source details
+- SQS dead-letter queue for failed Lambda invocations
+- CloudWatch log group with 30-day retention
+- IAM least privilege scoped per resource ARN
+- Infrastructure as code with Terraform
 
 **Required for Production**
-Private subnets with NAT gateway for instance isolation
-Restricted security group rules for SSH access
-CloudWatch Logs retention policies
-Automated backup and disaster recovery procedures
-Runbook documentation for manual intervention scenarios
-Load testing to validate alarm thresholds
-Integration with enterprise monitoring platforms
-Compliance and audit logging configuration
+- Private subnets with NAT gateway for instance isolation
+- Restricted security group rules for SSH access
+- Automated backup and disaster recovery procedures
+- Runbook documentation for manual intervention scenarios
+- Load testing to validate alarm thresholds
+- Integration with enterprise monitoring platforms
+- Compliance and audit logging configuration
+- Second-stage stop logic after reboot for persistent resource alarms
 
 ## License
 
