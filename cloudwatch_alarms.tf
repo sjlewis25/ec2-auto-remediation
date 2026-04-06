@@ -5,9 +5,9 @@ locals {
   }
 
   alarm_configs = {
-    cpu    = { metric_name = "CPUUtilization",    namespace = "AWS/EC2", threshold = 90, description = "CPU usage over 90%" }
-    memory = { metric_name = "mem_used_percent",  namespace = "CWAgent", threshold = 80, description = "Memory usage over 80%" }
-    disk   = { metric_name = "disk_used_percent", namespace = "CWAgent", threshold = 85, description = "Disk usage over 85%" }
+    cpu    = { metric_name = "CPUUtilization",    namespace = "AWS/EC2", threshold = var.cpu_threshold,    description = "CPU usage over ${var.cpu_threshold}%" }
+    memory = { metric_name = "mem_used_percent",  namespace = "CWAgent", threshold = var.memory_threshold, description = "Memory usage over ${var.memory_threshold}%" }
+    disk   = { metric_name = "disk_used_percent", namespace = "CWAgent", threshold = var.disk_threshold,   description = "Disk usage over ${var.disk_threshold}%" }
   }
 }
 

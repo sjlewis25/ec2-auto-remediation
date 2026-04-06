@@ -1,6 +1,9 @@
-import boto3
+import json
 import logging
 import os
+
+import boto3
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -9,13 +12,18 @@ ec2 = boto3.client('ec2')
 sns = boto3.client('sns')
 
 
+def log(level, action, **kwargs):
+    logger.log(level, json.dumps({"action": action, **kwargs}))
+
+
 def get_instance_state(instance_id):
     resp = ec2.describe_instances(InstanceIds=[instance_id])
     return resp['Reservations'][0]['Instances'][0]['State']['Name']
 
 
 def lambda_handler(event, context):
-    logger.info("Received event: %s", event)
+    log(logging.INFO, "event_received", event=event)
+
     detail = event.get('detail', {})
     source = event.get('source', '')
     instance_id = None
@@ -37,36 +45,54 @@ def lambda_handler(event, context):
         instance_id = detail['resource']['instanceDetails']['instanceId']
 
     if not instance_id:
-        logger.warning("Could not extract instance ID from event: %s", event)
+        log(logging.WARNING, "no_instance_id", event=event)
         return {"status": "no_instance_id"}
 
-    state = get_instance_state(instance_id)
-    logger.info("Instance %s is currently in state: %s", instance_id, state)
+    try:
+        state = get_instance_state(instance_id)
+    except ClientError as e:
+        log(logging.ERROR, "describe_instances_failed",
+            instance_id=instance_id, error=str(e))
+        raise
 
-    if source == 'aws.guardduty':
-        # Security threat: stop immediately
-        if state in ('stopped', 'stopping', 'terminated', 'shutting-down'):
-            logger.info("Instance %s already %s, skipping stop", instance_id, state)
-            action = f"already {state}, no action taken"
+    log(logging.INFO, "instance_state_checked", instance_id=instance_id, state=state)
+
+    try:
+        if source == 'aws.guardduty':
+            if state in ('stopped', 'stopping', 'terminated', 'shutting-down'):
+                outcome = f"already_{state}_no_action"
+                log(logging.INFO, "guardduty_skip", instance_id=instance_id, state=state)
+            else:
+                ec2.stop_instances(InstanceIds=[instance_id])
+                outcome = "stopped_security_threat"
+                log(logging.INFO, "instance_stopped", instance_id=instance_id, source=source)
         else:
-            logger.info("GuardDuty threat detected. Stopping instance %s", instance_id)
-            ec2.stop_instances(InstanceIds=[instance_id])
-            action = "stopped (security threat)"
-    else:
-        # Resource alarm: reboot first as graduated response
-        if state == 'running':
-            logger.info("Resource alarm triggered. Rebooting instance %s", instance_id)
-            ec2.reboot_instances(InstanceIds=[instance_id])
-            action = "rebooted (resource alarm)"
-        else:
-            logger.info("Instance %s in state %s, skipping reboot", instance_id, state)
-            action = f"in state {state}, no action taken"
+            if state == 'running':
+                ec2.reboot_instances(InstanceIds=[instance_id])
+                outcome = "rebooted_resource_alarm"
+                log(logging.INFO, "instance_rebooted", instance_id=instance_id, source=source)
+            else:
+                outcome = f"in_state_{state}_no_action"
+                log(logging.INFO, "remediation_skip", instance_id=instance_id, state=state)
+    except ClientError as e:
+        log(logging.ERROR, "remediation_failed",
+            instance_id=instance_id, source=source, error=str(e))
+        raise
 
-    sns.publish(
-        TopicArn=os.environ['SNS_TOPIC_ARN'],
-        Subject="EC2 Auto-Remediation Triggered",
-        Message=f"Instance {instance_id}: {action}.\nTriggering source: {source}",
-    )
+    try:
+        sns.publish(
+            TopicArn=os.environ['SNS_TOPIC_ARN'],
+            Subject="EC2 Auto-Remediation Triggered",
+            Message=json.dumps({
+                "instance_id":  instance_id,
+                "outcome":      outcome,
+                "source":       source,
+                "state_before": state,
+            }),
+        )
+    except ClientError as e:
+        # SNS failure should not fail the remediation — log and continue
+        log(logging.ERROR, "sns_publish_failed", instance_id=instance_id, error=str(e))
 
-    logger.info("Remediation complete for %s: %s", instance_id, action)
-    return {"status": "done", "instance_id": instance_id, "action": action}
+    log(logging.INFO, "remediation_complete", instance_id=instance_id, outcome=outcome)
+    return {"status": "done", "instance_id": instance_id, "action": outcome}
